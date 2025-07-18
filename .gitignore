@@ -1,9 +1,5 @@
-venv/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.log
-*.DS_Store
-.env
-.streamlit/secrets.toml
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile D:/id_rsa_resume
+  IdentitiesOnly yes
