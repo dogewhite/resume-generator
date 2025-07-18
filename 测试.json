@@ -1,0 +1,17 @@
+{
+    "chinese_name": "张三",
+    "gender": "男",
+    "birth_date": "1990-01-01",
+    "marital_status": "已婚",
+    "native_place": "江苏南京",
+    "current_city": "上海",
+    "email": "zhangsan@example.com",
+    "phone": "13800138000",
+    "current_salary": "30万/年",
+    "expected_salary": "40万/年",
+    "available_date": "一个月内",
+    "position": "高级工程师",
+    "company": "某某科技有限公司",
+    "consultant": "李顾问",
+    "recommend_date": "2025年06月20日"
+}
