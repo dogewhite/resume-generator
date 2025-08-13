@@ -12,6 +12,12 @@ from requests.exceptions import RequestException
 from typing import Dict, Any, List, Optional
 import tempfile
 import time
+from jinja2 import Environment, BaseLoader
+# 定义nl2br过滤器函数
+def nl2br(value):
+    if not value:
+        return ""
+    return value.replace('\n', '</w:t><w:br/><w:t>')
 
 # FastAPI 应用
 app = FastAPI()
@@ -436,37 +442,45 @@ def get_available_templates() -> List[str]:
     return templates
 
 def generate_doc(data: Dict[str, Any], template_name: str) -> Optional[bytes]:
-    """生成Word文档"""
+    """生成文档"""
+    temp_file_path = None
     try:
-        # 检查模板文件是否存在
         template_path = os.path.join("template", template_name)
         if not os.path.exists(template_path):
-            st.error(f"❌ 模板文件不存在: {template_path}")
+            st.error(f"❌ 模板文件不存在: {template_name}")
             return None
-            
-        # 创建临时文件
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-            # 渲染文档
-            st.info("📝 正在渲染文档...")
-            doc = DocxTemplate(template_path)
-            doc.render(data)
-            doc.save(tmp.name)
-            
-            # 读取生成的文件
-            with open(tmp.name, 'rb') as f:
-                doc_content = f.read()
-            
-            # 静默清理临时文件
-            try:
-                os.unlink(tmp.name)
-            except:
-                pass  # 忽略清理临时文件时的错误
-            
-            return doc_content
-            
+
+        # ✅ 第一步：只拿到临时文件路径，不打开
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.docx')
+        temp_file_path = tmp_file.name
+        tmp_file.close()  # ❗关键：关闭文件，释放占用（Windows必须）
+
+        # ✅ 构建 Jinja2 环境
+        jinja_env = Environment(loader=BaseLoader())
+        jinja_env.filters['nl2br'] = nl2br
+
+        # ✅ 渲染 Word
+        doc = DocxTemplate(template_path)
+        doc.render(data, jinja_env=jinja_env)
+        doc.save(temp_file_path)  # ✅ 写入关闭的路径，不再被占用
+
+        # ✅ 读取文件内容
+        with open(temp_file_path, 'rb') as f:
+            doc_bytes = f.read()
+
+        return doc_bytes
+
     except Exception as e:
-        st.error(f"❌ 生成文档时发生错误: {e}")
+        st.error(f"❌ 生成文档时发生错误: {str(e)}")
         return None
+
+    finally:
+        # 清理临时文件
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except Exception as e:
+                st.warning(f"⚠️ 清理临时文件失败（这不会影响文档生成）: {str(e)}")
 
 @app.post("/generate-doc/")
 async def generate_doc_endpoint(data: Dict[str, Any], template_name: str):
@@ -485,12 +499,12 @@ async def generate_doc_endpoint(data: Dict[str, Any], template_name: str):
 
 def init_session_state():
     """初始化session state"""
-    if 'resume_file_id' not in st.session_state:
-        st.session_state.resume_file_id = None
-    if 'jd_file_id' not in st.session_state:
-        st.session_state.jd_file_id = None
-    if 'resume_content' not in st.session_state:
-        st.session_state.resume_content = None
+    if 'resume_file_ids' not in st.session_state:
+        st.session_state.resume_file_ids = None
+    if 'jd_file_ids' not in st.session_state:
+        st.session_state.jd_file_ids = None
+    if 'resume_contents' not in st.session_state:
+        st.session_state.resume_contents = None
     if 'resume_data' not in st.session_state:
         st.session_state.resume_data = None
     if 'recommendation_data' not in st.session_state:
@@ -521,8 +535,8 @@ def show_stage_status():
         st.sidebar.header("暂存数据")
         if st.sidebar.checkbox("显示文件ID"):
             st.sidebar.json({
-                "简历文件ID": st.session_state.resume_file_id,
-                "JD文件ID": st.session_state.jd_file_id
+                "简历文件ID": st.session_state.resume_file_ids,
+                "JD文件ID": st.session_state.jd_file_ids
             })
         if st.session_state.processing_stage > 1 and st.sidebar.checkbox("显示简历分析结果"):
             st.sidebar.json(st.session_state.resume_data)
@@ -555,17 +569,27 @@ def process_with_status(status_container):
         # 分析简历
         if st.session_state.processing_stage == 2:
             show_processing_status(status_container, "🔄 正在分析简历...")
-            resume_content = read_file_content(st.session_state.resume_file_id)
-            if not resume_content:
-                st.error("❌ 无法读取简历内容")
-                return False
-            show_processing_status(status_container, "📄 简历内容读取成功", 0.3)
             
-            st.session_state.resume_content = resume_content
-            resume_data = call_moonshot_api(resume_content)
+            # 合并所有简历内容
+            resume_contents = []
+            for resume_file_id in st.session_state.resume_file_ids:
+                content = read_file_content(resume_file_id)
+                if not content:
+                    st.error("❌ 无法读取简历内容")
+                    return False
+                resume_contents.append(content)
+            
+            # 将所有简历内容合并为一个字符串，用分隔符分开
+            combined_resume = "\n\n=== 文件分隔符 ===\n\n".join(resume_contents)
+            show_processing_status(status_container, "📄 简历内容读取并合并成功", 0.3)
+            
+            st.session_state.resume_contents = combined_resume
+            # 对合并后的简历内容进行一次性分析
+            resume_data = call_moonshot_api(combined_resume)
             if not resume_data:
                 st.error("❌ 简历分析失败")
                 return False
+            
             st.session_state.resume_data = resume_data
             show_processing_status(status_container, "✅ 简历分析完成", 1.0)
             st.session_state.processing_stage = 3
@@ -574,14 +598,30 @@ def process_with_status(status_container):
         # 生成推荐分析
         if st.session_state.processing_stage == 3:
             show_processing_status(status_container, "🔄 正在生成推荐分析...")
+            
+            # 合并所有JD内容
+            jd_contents = []
+            for jd_file_id in st.session_state.jd_file_ids:
+                content = read_file_content(jd_file_id)
+                if not content:
+                    st.error("❌ 无法读取JD内容")
+                    return False
+                jd_contents.append(content)
+            
+            # 将所有JD内容合并为一个字符串
+            combined_jd = "\n\n=== 文件分隔符 ===\n\n".join(jd_contents)
+            
+            # 使用合并后的简历和JD内容进行分析
             recommendation_data = call_kimi_api(
-                st.session_state.resume_file_id,
-                st.session_state.jd_file_id,
-                st.session_state.get('additional_info', '')
+                st.session_state.resume_file_ids[0],  # 传递第一个文件ID
+                st.session_state.jd_file_ids[0],      # 传递第一个文件ID
+                f"{st.session_state.get('additional_info', '')}\n\n补充说明：以上是多个文件合并的内容，请综合分析。\n简历文件数量：{len(resume_contents)}个\nJD文件数量：{len(jd_contents)}个"
             )
+            
             if not recommendation_data:
                 st.error("❌ 推荐分析生成失败")
                 return False
+            
             st.session_state.recommendation_data = recommendation_data
             show_processing_status(status_container, "✅ 推荐分析生成完成", 1.0)
             st.session_state.processing_stage = 4
@@ -665,9 +705,9 @@ def main():
     
     # 文件上传区域
     st.header("文件上传")
-    resume_file = st.file_uploader("上传简历文件", type=["pdf", "doc", "docx", "txt", "xls", "jpg", "png"])
-    jd_file = st.file_uploader("上传招聘JD", type=["pdf", "doc", "docx", "txt"])
-    
+    resume_files = st.file_uploader("上传简历文件", type=["pdf", "doc", "docx", "txt", "xls", "jpg", "png"], accept_multiple_files=True)
+    jd_files = st.file_uploader("上传招聘JD", type=["pdf", "doc", "docx", "txt", "jpg", "jpeg", "png", "gif", "webp"], accept_multiple_files=True)
+
     # Chat输入区域
     st.header("补充信息")
     additional_info = st.text_area("请输入补充信息（可选）")
@@ -682,28 +722,34 @@ def main():
             with process_col1:
                 # 检查是否需要重新上传文件
                 if st.session_state.processing_stage == 0:
-                    if resume_file is None or jd_file is None:
+                    if not resume_files or not jd_files:
                         st.error("❌ 请上传简历文件和招聘JD")
                         return
                         
                     with st.spinner("正在处理文件..."):
                         try:
-                            # 上传文件到Kimi
+                            # 上传简历文件到Kimi
                             st.info("📤 正在上传简历文件...")
-                            resume_file_id = upload_file_to_kimi(resume_file.read(), resume_file.name)
-                            if not resume_file_id:
-                                st.error("❌ 简历文件上传失败")
-                                return
-                            st.session_state.resume_file_id = resume_file_id
-                            st.success(f"✅ 简历文件上传成功")
+                            resume_file_ids = []
+                            for resume_file in resume_files:
+                                file_id = upload_file_to_kimi(resume_file.read(), resume_file.name)
+                                if not file_id:
+                                    st.error(f"❌ 简历文件 {resume_file.name} 上传失败")
+                                    return
+                                resume_file_ids.append(file_id)
+                            st.session_state.resume_file_ids = resume_file_ids
+                            st.success(f"✅ {len(resume_files)} 个简历文件上传成功")
                                 
                             st.info("📤 正在上传JD文件...")
-                            jd_file_id = upload_file_to_kimi(jd_file.read(), jd_file.name)
-                            if not jd_file_id:
-                                st.error("❌ JD文件上传失败")
-                                return
-                            st.session_state.jd_file_id = jd_file_id
-                            st.success(f"✅ JD文件上传成功")
+                            jd_file_ids = []
+                            for jd_file in jd_files:
+                                file_id = upload_file_to_kimi(jd_file.read(), jd_file.name)
+                                if not file_id:
+                                    st.error(f"❌ JD文件 {jd_file.name} 上传失败")
+                                    return
+                                jd_file_ids.append(file_id)
+                            st.session_state.jd_file_ids = jd_file_ids
+                            st.success(f"✅ {len(jd_files)} 个JD文件上传成功")
                                 
                             # 保存补充信息
                             st.session_state.additional_info = additional_info
@@ -720,7 +766,8 @@ def main():
                     status_container = st.empty()
                     show_processing_status(status_container, "⏳ 等待文件处理完成...")
                     
-                    for file_id in [st.session_state.resume_file_id, st.session_state.jd_file_id]:
+                    all_file_ids = st.session_state.resume_file_ids + st.session_state.jd_file_ids
+                    for file_id in all_file_ids:
                         max_wait = 30  # 最多等待30秒
                         progress = 0
                         while max_wait > 0 and not check_file_status(file_id):
